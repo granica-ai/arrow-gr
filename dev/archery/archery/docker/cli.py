@@ -25,8 +25,8 @@ from .core import DockerCompose, UndefinedImage
 
 
 def _mock_compose_calls(compose):
-    from types import MethodType
     from subprocess import CompletedProcess
+    from types import MethodType
 
     def _mock(compose, executable):
         def _execute(self, *args, **kwargs):
@@ -64,7 +64,8 @@ def docker(ctx, src, dry_run):
 
     # take the docker-compose parameters like PYTHON, PANDAS, UBUNTU from the
     # environment variables to keep the usage similar to docker-compose
-    compose = DockerCompose(config_path, params=os.environ)
+    compose_bin = "docker compose"
+    compose = DockerCompose(config_path, compose_bin=compose_bin, params=os.environ)
     if dry_run:
         _mock_compose_calls(compose)
     ctx.obj['compose'] = compose
