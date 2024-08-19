@@ -129,6 +129,46 @@ using internal::ToURLEncodedAwsString;
 static const char kSep = '/';
 
 // -----------------------------------------------------------------------
+// Composite Etag Key
+
+static const char compositeKeySep = '#';
+
+std::string TrimEtag(const std::string& str) {
+  size_t first = str.find_first_not_of('\"');
+  if (std::string::npos == first) {
+    return str;
+  }
+  size_t last = str.find_last_not_of('\"');
+  return str.substr(first, (last - first + 1));
+}
+
+std::string MakeCompositeKey(const std::string& key, const std::string& etag) {
+  if (etag.empty()) {
+    return key;
+  }
+  std::stringstream ss;
+  ss << key << compositeKeySep << TrimEtag(etag);
+  return ss.str();
+}
+
+std::vector<std::string> SplitCompositeKey(const std::string& compositeKey) {
+  std::vector<std::string> result(2);
+  size_t sepPos = compositeKey.find_first_of(compositeKeySep);
+
+  if (sepPos != std::string::npos) {
+    result[0] = compositeKey.substr(0, sepPos);
+    result[1] = compositeKey.substr(sepPos + 1);
+  } else {
+    // If there is no separator, entire compositeKey is considered as the original path,
+    // and ETag is empty.
+    result[0] = compositeKey;
+    result[1] = "";
+  }
+
+  return result;
+}
+
+// -----------------------------------------------------------------------
 // S3ProxyOptions implementation
 
 Result<S3ProxyOptions> S3ProxyOptions::FromUri(const Uri& uri) {
@@ -1064,11 +1104,20 @@ Aws::IOStreamFactory AwsWriteableStreamFactory(void* data, int64_t nbytes) {
 Result<S3Model::GetObjectResult> GetObjectRange(Aws::S3::S3Client* client,
                                                 const S3Path& path, int64_t start,
                                                 int64_t length, void* out) {
+  std::vector<std::string> splittedKey = SplitCompositeKey(path.key);
+  std::string originalKey = splittedKey[0];
+  std::string etag = splittedKey[1];
+  ARROW_LOG(DEBUG) << "GetObjectRange -> Key: " << originalKey << " ETAG: " << etag;
+
   S3Model::GetObjectRequest req;
+  if (!etag.empty()) {
+    req.SetIfMatch(ToAwsString(etag));
+  }
   req.SetBucket(ToAwsString(path.bucket));
-  req.SetKey(ToAwsString(path.key));
+  req.SetKey(ToAwsString(originalKey));
   req.SetRange(ToAwsString(FormatRange(start, length)));
   req.SetResponseStreamFactory(AwsWriteableStreamFactory(out, length));
+
   return OutcomeToResult("GetObject", client->GetObject(req));
 }
 
@@ -1187,9 +1236,11 @@ class ObjectInputFile final : public io::RandomAccessFile {
       return Status::OK();
     }
 
+    std::vector<std::string> splittedKey = SplitCompositeKey(path_.key);
+    std::string originalKey = splittedKey[0];
     S3Model::HeadObjectRequest req;
     req.SetBucket(ToAwsString(path_.bucket));
-    req.SetKey(ToAwsString(path_.key));
+    req.SetKey(ToAwsString(originalKey));
 
     ARROW_ASSIGN_OR_RAISE(auto client_lock, holder_->Lock());
     auto outcome = client_lock.Move()->HeadObject(req);
@@ -1361,9 +1412,11 @@ class ObjectOutputStream final : public io::OutputStream {
     ARROW_ASSIGN_OR_RAISE(auto client_lock, holder_->Lock());
 
     // Initiate the multi-part upload
+    std::vector<std::string> splittedKey = SplitCompositeKey(path_.key);
+    std::string originalKey = splittedKey[0];
     S3Model::CreateMultipartUploadRequest req;
     req.SetBucket(ToAwsString(path_.bucket));
-    req.SetKey(ToAwsString(path_.key));
+    req.SetKey(ToAwsString(originalKey));
     if (metadata_ && metadata_->size() != 0) {
       RETURN_NOT_OK(SetObjectMetadata(metadata_, &req));
     } else if (default_metadata_ && default_metadata_->size() != 0) {
@@ -1397,9 +1450,11 @@ class ObjectOutputStream final : public io::OutputStream {
 
     ARROW_ASSIGN_OR_RAISE(auto client_lock, holder_->Lock());
 
+    std::vector<std::string> splittedKey = SplitCompositeKey(path_.key);
+    std::string originalKey = splittedKey[0];
     S3Model::AbortMultipartUploadRequest req;
     req.SetBucket(ToAwsString(path_.bucket));
-    req.SetKey(ToAwsString(path_.key));
+    req.SetKey(ToAwsString(originalKey));
     req.SetUploadId(upload_id_);
 
     auto outcome = client_lock.Move()->AbortMultipartUpload(req);
@@ -1444,11 +1499,13 @@ class ObjectOutputStream final : public io::OutputStream {
       DCHECK_EQ(upload_state_->completed_parts.size(),
                 static_cast<size_t>(part_number_ - 1));
 
+      std::vector<std::string> splittedKey = SplitCompositeKey(path_.key);
+      std::string originalKey = splittedKey[0];
       S3Model::CompletedMultipartUpload completed_upload;
       completed_upload.SetParts(upload_state_->completed_parts);
       S3Model::CompleteMultipartUploadRequest req;
       req.SetBucket(ToAwsString(path_.bucket));
-      req.SetKey(ToAwsString(path_.key));
+      req.SetKey(ToAwsString(originalKey));
       req.SetUploadId(upload_id_);
       req.SetMultipartUpload(std::move(completed_upload));
 
@@ -1562,9 +1619,11 @@ class ObjectOutputStream final : public io::OutputStream {
 
   Status UploadPart(const void* data, int64_t nbytes,
                     std::shared_ptr<Buffer> owned_buffer = nullptr) {
+    std::vector<std::string> splittedKey = SplitCompositeKey(path_.key);
+    std::string originalKey = splittedKey[0];
     S3Model::UploadPartRequest req;
     req.SetBucket(ToAwsString(path_.bucket));
-    req.SetKey(ToAwsString(path_.key));
+    req.SetKey(ToAwsString(originalKey));
     req.SetUploadId(upload_id_);
     req.SetPartNumber(part_number_);
     req.SetContentLength(nbytes);
@@ -1686,12 +1745,16 @@ class ObjectOutputStream final : public io::OutputStream {
 
 // This function assumes info->path() is already set
 void FileObjectToInfo(const S3Model::HeadObjectResult& obj, FileInfo* info) {
+  std::string path_with_etag = MakeCompositeKey(info->path(), obj.GetETag());
+  info->set_path(path_with_etag);
   info->set_type(FileType::File);
   info->set_size(static_cast<int64_t>(obj.GetContentLength()));
   info->set_mtime(FromAwsDatetime(obj.GetLastModified()));
 }
 
 void FileObjectToInfo(const S3Model::Object& obj, FileInfo* info) {
+  std::string path_with_etag = MakeCompositeKey(info->path(), obj.GetETag());
+  info->set_path(path_with_etag);
   info->set_type(FileType::File);
   info->set_size(static_cast<int64_t>(obj.GetSize()));
   info->set_mtime(FromAwsDatetime(obj.GetLastModified()));
@@ -1943,9 +2006,11 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
   Status CreateEmptyObject(const std::string& bucket, const std::string& key) {
     ARROW_ASSIGN_OR_RAISE(auto client_lock, holder_->Lock());
 
+    std::vector<std::string> splittedKey = SplitCompositeKey(key);
+    std::string originalKey = splittedKey[0];
     S3Model::PutObjectRequest req;
     req.SetBucket(ToAwsString(bucket));
-    req.SetKey(ToAwsString(key));
+    req.SetKey(ToAwsString(originalKey));
     req.SetBody(std::make_shared<std::stringstream>(""));
     return OutcomeToStatus(
         std::forward_as_tuple("When creating key '", key, "' in bucket '", bucket, "': "),
@@ -1960,9 +2025,11 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
   Status DeleteObject(const std::string& bucket, const std::string& key) {
     ARROW_ASSIGN_OR_RAISE(auto client_lock, holder_->Lock());
 
+    std::vector<std::string> splittedKey = SplitCompositeKey(key);
+    std::string originalKey = splittedKey[0];
     S3Model::DeleteObjectRequest req;
     req.SetBucket(ToAwsString(bucket));
-    req.SetKey(ToAwsString(key));
+    req.SetKey(ToAwsString(originalKey));
     return OutcomeToStatus(
         std::forward_as_tuple("When delete key '", key, "' in bucket '", bucket, "': "),
         "DeleteObject", client_lock.Move()->DeleteObject(req));
@@ -1971,9 +2038,11 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
   Status CopyObject(const S3Path& src_path, const S3Path& dest_path) {
     ARROW_ASSIGN_OR_RAISE(auto client_lock, holder_->Lock());
 
+    std::vector<std::string> splittedKey = SplitCompositeKey(dest_path.key);
+    std::string originalKey = splittedKey[0];
     S3Model::CopyObjectRequest req;
     req.SetBucket(ToAwsString(dest_path.bucket));
-    req.SetKey(ToAwsString(dest_path.key));
+    req.SetKey(ToAwsString(originalKey));
     // ARROW-13048: Copy source "Must be URL-encoded" according to AWS SDK docs.
     // However at least in 1.8 and 1.9 the SDK URL-encodes the path for you
     req.SetCopySource(src_path.ToAwsString());
@@ -2011,13 +2080,15 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
     // We come here in one of two situations:
     // - we don't know the backend and there is no previous outcome
     // - the backend is Minio
+    std::vector<std::string> splittedKey = SplitCompositeKey(key);
+    std::string originalKey = splittedKey[0];
     S3Model::HeadObjectRequest req;
     req.SetBucket(ToAwsString(bucket));
     if (backend_ && *backend_ == S3Backend::Minio) {
       // Minio wants a slash at the end, Amazon doesn't
-      req.SetKey(ToAwsString(key) + kSep);
+      req.SetKey(ToAwsString(originalKey) + kSep);
     } else {
-      req.SetKey(ToAwsString(key));
+      req.SetKey(ToAwsString(originalKey));
     }
 
     auto outcome = client_lock.Move()->HeadObject(req);
@@ -2488,9 +2559,11 @@ Result<FileInfo> S3FileSystem::GetFileInfo(const std::string& s) {
     return info;
   } else {
     // It's an object
+    std::vector<std::string> splittedKey = SplitCompositeKey(path.key);
+    std::string originalKey = splittedKey[0];
     S3Model::HeadObjectRequest req;
     req.SetBucket(ToAwsString(path.bucket));
-    req.SetKey(ToAwsString(path.key));
+    req.SetKey(ToAwsString(originalKey));
 
     auto outcome = client_lock.Move()->HeadObject(req);
     if (outcome.IsSuccess()) {
@@ -2695,9 +2768,11 @@ Status S3FileSystem::DeleteFile(const std::string& s) {
   RETURN_NOT_OK(ValidateFilePath(path));
 
   // Check the object exists
+  std::vector<std::string> splittedKey = SplitCompositeKey(path.key);
+  std::string originalKey = splittedKey[0];
   S3Model::HeadObjectRequest req;
   req.SetBucket(ToAwsString(path.bucket));
-  req.SetKey(ToAwsString(path.key));
+  req.SetKey(ToAwsString(originalKey));
 
   auto outcome = client_lock.Move()->HeadObject(req);
   if (!outcome.IsSuccess()) {
