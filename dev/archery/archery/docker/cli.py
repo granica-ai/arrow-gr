@@ -38,7 +38,7 @@ def _mock_compose_calls(compose):
         return MethodType(_execute, compose)
 
     compose._execute_docker = _mock(compose, executable='docker')
-    compose._execute_compose = _mock(compose, executable='docker-compose')
+    compose._execute_compose = _mock(compose, executable='docker compose')
 
 
 @click.group()

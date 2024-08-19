@@ -23,9 +23,9 @@ from io import StringIO
 from dotenv import dotenv_values
 from ruamel.yaml import YAML
 
+from ..compat import _ensure_path
 from ..utils.command import Command, default_bin
 from ..utils.source import arrow_path
-from ..compat import _ensure_path
 
 
 def flatten(node, parents=None):
@@ -122,7 +122,7 @@ class ComposeConfig:
             )
 
         # trigger docker-compose's own validation
-        compose = Command('docker-compose')
+        compose = Command('docker compose')
         args = ['--file', str(config_path), 'config']
         result = compose.run(*args, env=self.env, check=False,
                              stderr=subprocess.PIPE, stdout=subprocess.PIPE)
@@ -165,7 +165,7 @@ class DockerCompose(Command):
 
     def __init__(self, config_path, dotenv_path=None, compose_bin=None,
                  params=None):
-        compose_bin = default_bin(compose_bin, 'docker-compose')
+        compose_bin = default_bin(compose_bin, 'docker compose')
         self.config = ComposeConfig(config_path, dotenv_path, compose_bin,
                                     params)
         self.bin = compose_bin
