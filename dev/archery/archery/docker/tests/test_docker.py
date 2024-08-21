@@ -22,10 +22,8 @@ import subprocess
 from unittest import mock
 
 import pytest
-
 from archery.docker import DockerCompose
-from archery.testing import assert_subprocess_calls, override_env, PartialEnv
-
+from archery.testing import PartialEnv, assert_subprocess_calls, override_env
 
 missing_service_compose_yml = """
 version: '3.5'
@@ -243,7 +241,7 @@ def assert_docker_calls(compose, expected_args):
 
 
 def assert_compose_calls(compose, expected_args, env=mock.ANY):
-    base_command = ['docker-compose', '--file', str(compose.config.path)]
+    base_command = ['docker compose', '--file', str(compose.config.path)]
     expected_commands = []
     for args in expected_args:
         if isinstance(args, str):
@@ -482,7 +480,7 @@ def test_compose_push(arrow_compose_path):
     ]
     for image in ["conda-cpp", "conda-python", "conda-python-pandas"]:
         expected_calls.append(
-            mock.call(["docker-compose", "--file", str(compose.config.path),
+            mock.call(["docker compose", "--file", str(compose.config.path),
                        "push", image], check=True, env=expected_env)
         )
     with assert_subprocess_calls(expected_calls):
